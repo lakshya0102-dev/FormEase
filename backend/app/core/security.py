@@ -6,6 +6,7 @@ Rejects any unverified, expired, or malformed tokens.
 from typing import Optional, Dict, Any
 import uuid
 import time
+import asyncio
 import threading
 import logging
 import os
@@ -16,6 +17,7 @@ import ssl
 import queue
 from collections import deque
 from urllib.parse import urlsplit
+import aiohttp
 import httpx
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -42,6 +44,49 @@ def _create_jwks_client() -> httpx.Client:
         ),
         trust_env=True,
     )
+
+
+async def _fetch_supabase_jwks_async(jwks_url: str) -> list:
+    connector = aiohttp.TCPConnector(
+        resolver=aiohttp.AsyncResolver(),
+        limit=1,
+        ttl_dns_cache=300,
+    )
+    timeout = aiohttp.ClientTimeout(total=4.0, connect=2.0, sock_read=3.0)
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+        trust_env=True,
+    ) as client:
+        for attempt in range(2):
+            try:
+                async with client.get(jwks_url, allow_redirects=False) as response:
+                    response.raise_for_status()
+                    if response.status != 200:
+                        raise ValueError("Supabase JWKS endpoint returned a non-200 response.")
+                    jwks = await response.json()
+                keys = jwks.get("keys") if isinstance(jwks, dict) else None
+                if not isinstance(keys, list):
+                    raise ValueError("Supabase JWKS response has an invalid keys field.")
+                return keys
+            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
+                if attempt == 1:
+                    raise
+                await asyncio.sleep(random.uniform(0.05, 0.15))
+            except aiohttp.ClientResponseError as exc:
+                if exc.status < 500 or attempt == 1:
+                    raise
+                await asyncio.sleep(random.uniform(0.05, 0.15))
+
+    raise RuntimeError("Supabase JWKS async resolver retry limit exceeded.")
+
+
+def _fetch_supabase_jwks_with_async_resolver(jwks_url: str) -> list:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_fetch_supabase_jwks_async(jwks_url))
+    raise RuntimeError("Async JWKS fallback cannot run inside an active event loop.")
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
@@ -344,6 +389,23 @@ def _get_supabase_jwks(force_refresh: bool = False) -> list:
                         _jwks_failure_details(cleanup_exc),
                         _safe_traceback(cleanup_exc),
                     )
+                logger.warning("JWKS_ASYNC_RESOLVER_FALLBACK_START")
+                try:
+                    keys = _fetch_supabase_jwks_with_async_resolver(jwks_url)
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "JWKS_ASYNC_RESOLVER_FALLBACK_COMPLETE status=failed details=%s\n%s",
+                        _jwks_failure_details(fallback_exc),
+                        _safe_traceback(fallback_exc),
+                    )
+                else:
+                    _jwks_cache.update({
+                        "url": jwks_url,
+                        "keys": keys,
+                        "expires_at": time.monotonic() + 480,
+                    })
+                    logger.warning("JWKS_ASYNC_RESOLVER_FALLBACK_COMPLETE status=success")
+                    return keys
                 _run_jwks_diagnostic_safely(jwks_url)
                 raise
             except Exception as exc:

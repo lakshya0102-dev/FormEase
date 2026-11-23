@@ -9,6 +9,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+import aiohttp
 import httpx
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -178,6 +179,107 @@ def test_transient_transport_failure_retries_without_caching_failure(monkeypatch
     assert 0.05 <= delays[0] <= 0.15
 
 
+def test_async_resolver_fallback_verifies_and_caches_jwks(monkeypatch, caplog):
+    token, public_jwk = make_asymmetric_token("ES256")
+    failed_clients = [
+        FakeClient(httpx.ConnectError("sync DNS path unavailable")),
+        FakeClient(httpx.ConnectError("sync DNS path unavailable")),
+    ]
+    fallback_calls = []
+    install_clients(monkeypatch, *failed_clients)
+    monkeypatch.setattr(
+        security,
+        "_fetch_supabase_jwks_with_async_resolver",
+        lambda url: fallback_calls.append(url) or [public_jwk],
+    )
+    monkeypatch.setattr(
+        security,
+        "_run_jwks_diagnostic_safely",
+        lambda _: pytest.fail("diagnostic should not run after fallback succeeds"),
+    )
+    caplog.set_level(logging.WARNING, logger=security.__name__)
+
+    payload = security.verify_supabase_jwt(token)
+    cached_keys = security._get_supabase_jwks()
+
+    assert payload["aud"] == "authenticated"
+    assert payload["iss"] == f"{PROJECT_URL}/auth/v1"
+    assert fallback_calls == [f"{PROJECT_URL}/auth/v1/.well-known/jwks.json"]
+    assert cached_keys == [public_jwk]
+    assert [len(client.calls) for client in failed_clients] == [1, 1]
+    assert "JWKS_ASYNC_RESOLVER_FALLBACK_START" in caplog.text
+    assert "JWKS_ASYNC_RESOLVER_FALLBACK_COMPLETE status=success" in caplog.text
+
+
+def test_async_resolver_uses_aiohttp_cares_connector_and_bounded_retry(monkeypatch):
+    _, public_jwk = make_asymmetric_token("RS256")
+    outcomes = [aiohttp.ClientConnectionError("private DNS error"), {"keys": [public_jwk]}]
+    session_instances = []
+    connector_options = []
+    resolver_instances = []
+
+    class FakeResolver:
+        def __init__(self):
+            resolver_instances.append(self)
+
+    class FakeConnector:
+        def __init__(self, **kwargs):
+            connector_options.append(kwargs)
+
+    class FakeResponse:
+        status = 200
+
+        def raise_for_status(self):
+            return None
+
+        async def json(self):
+            return outcomes.pop(0)
+
+    class FakeRequest:
+        async def __aenter__(self):
+            outcome = outcomes[0]
+            if isinstance(outcome, Exception):
+                outcomes.pop(0)
+                raise outcome
+            return FakeResponse()
+
+        async def __aexit__(self, _exc_type, _exc_value, _traceback):
+            return None
+
+    class FakeSession:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+            self.calls = []
+            session_instances.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, _exc_type, _exc_value, _traceback):
+            return None
+
+        def get(self, url, **kwargs):
+            self.calls.append(url)
+            assert kwargs == {"allow_redirects": False}
+            return FakeRequest()
+
+    monkeypatch.setattr(security.aiohttp, "AsyncResolver", FakeResolver)
+    monkeypatch.setattr(security.aiohttp, "TCPConnector", FakeConnector)
+    monkeypatch.setattr(security.aiohttp, "ClientSession", FakeSession)
+
+    keys = security._fetch_supabase_jwks_with_async_resolver(
+        f"{PROJECT_URL}/auth/v1/.well-known/jwks.json",
+    )
+
+    assert keys == [public_jwk]
+    assert len(session_instances) == 1
+    assert len(session_instances[0].calls) == 2
+    assert session_instances[0].options["trust_env"] is True
+    assert connector_options[0]["resolver"] is resolver_instances[0]
+    assert connector_options[0]["limit"] == 1
+    assert connector_options[0]["ttl_dns_cache"] == 300
+
+
 def test_concurrent_cache_misses_share_one_jwks_request(monkeypatch):
     barrier = threading.Barrier(8)
     _, public_jwk = make_asymmetric_token("ES256")
@@ -214,6 +316,11 @@ def test_jwks_failure_logs_traceback_but_not_token_or_secrets(monkeypatch, caplo
     ]
     install_clients(monkeypatch, *failed_clients)
     monkeypatch.setattr(security, "_run_supabase_network_diagnostic", lambda _: None)
+    monkeypatch.setattr(
+        security,
+        "_fetch_supabase_jwks_with_async_resolver",
+        lambda _: (_ for _ in ()).throw(httpx.ConnectError("private fallback error")),
+    )
     caplog.set_level(logging.WARNING, logger=security.__name__)
 
     for _ in range(2):
@@ -258,6 +365,11 @@ def test_terminal_failure_marks_probe_and_preserves_original_auth_error(monkeypa
         raise RuntimeError("private diagnostic message")
 
     monkeypatch.setattr(security, "_discard_jwks_client", discard_client)
+    monkeypatch.setattr(
+        security,
+        "_fetch_supabase_jwks_with_async_resolver",
+        lambda _: (_ for _ in ()).throw(RuntimeError("private fallback message")),
+    )
     monkeypatch.setattr(security, "_run_supabase_network_diagnostic", fail_diagnostic)
     caplog.set_level(logging.WARNING, logger=security.__name__)
 
@@ -270,6 +382,7 @@ def test_terminal_failure_marks_probe_and_preserves_original_auth_error(monkeypa
     assert caplog.text.index("JWKS_DIAGNOSTIC_START") < caplog.text.index("JWKS_DIAGNOSTIC_ERROR")
     assert caplog.text.index("JWKS_DIAGNOSTIC_ERROR") < caplog.text.index("JWKS_DIAGNOSTIC_COMPLETE")
     assert "private cleanup message" not in caplog.text
+    assert "private fallback message" not in caplog.text
     assert "private diagnostic message" not in caplog.text
     assert "original network error" not in caplog.text
 
