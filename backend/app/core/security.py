@@ -117,7 +117,8 @@ def _safe_traceback(exc: BaseException) -> str:
     for item in _exception_chain(exc):
         if item.__traceback__ is not None:
             lines.append("Traceback (most recent call last):\n")
-            lines.extend(traceback.format_list(traceback.extract_tb(item.__traceback__)))
+            for frame in traceback.extract_tb(item.__traceback__):
+                lines.append(f'  File "{frame.filename}", line {frame.lineno}, in {frame.name}\n')
         lines.append(f"{type(item).__module__}.{type(item).__qualname__}: <message redacted>\n")
     return "".join(lines)
 
@@ -257,6 +258,7 @@ def _run_supabase_network_diagnostic(jwks_url: str) -> None:
 
     with _jwks_diagnostic_lock:
         if _jwks_diagnostic_started:
+            logger.warning("JWKS_DIAGNOSTIC_SKIP reason=already_run")
             return
         _jwks_diagnostic_started = True
 
@@ -269,6 +271,20 @@ def _run_supabase_network_diagnostic(jwks_url: str) -> None:
             _jwks_failure_details(exc),
             _safe_traceback(exc),
         )
+
+
+def _run_jwks_diagnostic_safely(jwks_url: str) -> None:
+    logger.warning("JWKS_DIAGNOSTIC_START")
+    try:
+        _run_supabase_network_diagnostic(jwks_url)
+    except Exception as exc:
+        logger.warning(
+            "JWKS_DIAGNOSTIC_ERROR: %s\n%s",
+            _jwks_failure_details(exc),
+            _safe_traceback(exc),
+        )
+    finally:
+        logger.warning("JWKS_DIAGNOSTIC_COMPLETE")
 
 
 def _discard_jwks_client() -> None:
@@ -320,8 +336,15 @@ def _get_supabase_jwks(force_refresh: bool = False) -> list:
                     _discard_jwks_client()
                     time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
                     continue
-                _discard_jwks_client()
-                _run_supabase_network_diagnostic(jwks_url)
+                try:
+                    _discard_jwks_client()
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "JWKS_CLIENT_CLEANUP_ERROR: %s\n%s",
+                        _jwks_failure_details(cleanup_exc),
+                        _safe_traceback(cleanup_exc),
+                    )
+                _run_jwks_diagnostic_safely(jwks_url)
                 raise
             except Exception as exc:
                 _log_jwks_failure(exc, attempt, False)

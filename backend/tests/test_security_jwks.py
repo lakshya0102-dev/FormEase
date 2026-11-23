@@ -236,6 +236,44 @@ def test_jwks_failure_logs_traceback_but_not_token_or_secrets(monkeypatch, caplo
     assert [len(client.calls) for client in failed_clients] == [1, 1, 1, 1]
 
 
+def test_terminal_failure_marks_probe_and_preserves_original_auth_error(monkeypatch, caplog):
+    token, _ = make_asymmetric_token("ES256")
+    clients = [
+        FakeClient(httpx.ConnectError("original network error")),
+        FakeClient(httpx.ConnectError("original network error")),
+    ]
+    install_clients(monkeypatch, *clients)
+    discard_count = 0
+    diagnostic_calls = []
+
+    def discard_client():
+        nonlocal discard_count
+        discard_count += 1
+        security._jwks_client = None
+        if discard_count == 2:
+            raise OSError(16, "private cleanup message")
+
+    def fail_diagnostic(url):
+        diagnostic_calls.append(url)
+        raise RuntimeError("private diagnostic message")
+
+    monkeypatch.setattr(security, "_discard_jwks_client", discard_client)
+    monkeypatch.setattr(security, "_run_supabase_network_diagnostic", fail_diagnostic)
+    caplog.set_level(logging.WARNING, logger=security.__name__)
+
+    with pytest.raises(HTTPException) as error:
+        security.verify_supabase_jwt(token)
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Unable to retrieve Supabase signing keys."
+    assert diagnostic_calls == [f"{PROJECT_URL}/auth/v1/.well-known/jwks.json"]
+    assert caplog.text.index("JWKS_DIAGNOSTIC_START") < caplog.text.index("JWKS_DIAGNOSTIC_ERROR")
+    assert caplog.text.index("JWKS_DIAGNOSTIC_ERROR") < caplog.text.index("JWKS_DIAGNOSTIC_COMPLETE")
+    assert "private cleanup message" not in caplog.text
+    assert "private diagnostic message" not in caplog.text
+    assert "original network error" not in caplog.text
+
+
 def test_exception_chain_follows_cause_and_context_with_cycle_protection():
     outer = RuntimeError("private outer message")
     cause = OSError(16, os.strerror(16))
@@ -399,7 +437,7 @@ def test_network_probe_records_dns_tcp_tls_and_httpx_results(monkeypatch):
     assert proxy_url not in repr(result)
 
 
-def test_temporary_network_diagnostic_runs_only_once(monkeypatch):
+def test_temporary_network_diagnostic_runs_only_once(monkeypatch, caplog):
     calls = []
     monkeypatch.setattr(security, "_jwks_diagnostic_started", False)
     monkeypatch.setattr(
@@ -407,12 +445,33 @@ def test_temporary_network_diagnostic_runs_only_once(monkeypatch):
         "_probe_supabase_network",
         lambda url: calls.append(url) or {"httpx": {"status": "response", "http_status": 200}},
     )
+    caplog.set_level(logging.WARNING, logger=security.__name__)
 
     url = f"{PROJECT_URL}/auth/v1/.well-known/jwks.json"
     security._run_supabase_network_diagnostic(url)
     security._run_supabase_network_diagnostic(url)
 
     assert calls == [url]
+    assert caplog.text.count("Temporary Supabase JWKS network diagnostic:") == 1
+    assert "JWKS_DIAGNOSTIC_SKIP reason=already_run" in caplog.text
+
+
+def test_network_diagnostic_failure_is_logged_without_escaping(monkeypatch, caplog):
+    monkeypatch.setattr(security, "_jwks_diagnostic_started", False)
+    monkeypatch.setattr(
+        security,
+        "_probe_supabase_network",
+        lambda _: (_ for _ in ()).throw(RuntimeError("private diagnostic detail")),
+    )
+    caplog.set_level(logging.WARNING, logger=security.__name__)
+
+    security._run_supabase_network_diagnostic(
+        f"{PROJECT_URL}/auth/v1/.well-known/jwks.json",
+    )
+
+    assert "Temporary Supabase JWKS network diagnostic failed:" in caplog.text
+    assert "RuntimeError" in caplog.text
+    assert "private diagnostic detail" not in caplog.text
 
 
 def test_jwks_failure_classifier_distinguishes_dns_proxy_timeout_and_http_status():
