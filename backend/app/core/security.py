@@ -6,18 +6,13 @@ Rejects any unverified, expired, or malformed tokens.
 from typing import Optional, Dict, Any
 import uuid
 import time
-import asyncio
 import threading
 import logging
 import os
 import random
 import socket
 import traceback
-import ssl
-import queue
 from collections import deque
-from urllib.parse import urlsplit
-import aiohttp
 import httpx
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -30,9 +25,6 @@ security_scheme = HTTPBearer(auto_error=False)
 _jwks_cache: Dict[str, Any] = {"keys": [], "expires_at": 0.0, "url": ""}
 _jwks_lock = threading.Lock()
 _jwks_client: Optional[httpx.Client] = None
-_jwks_diagnostic_lock = threading.Lock()
-_jwks_diagnostic_started = False
-_JWKS_ASYNC_FETCH_TIMEOUT_SECONDS = 7.0
 
 
 def _create_jwks_client() -> httpx.Client:
@@ -45,75 +37,6 @@ def _create_jwks_client() -> httpx.Client:
         ),
         trust_env=True,
     )
-
-
-async def _fetch_supabase_jwks_async(jwks_url: str) -> list:
-    logger.warning("JWKS_ASYNC_RESOLVER_INIT_START")
-    connector = aiohttp.TCPConnector(
-        resolver=aiohttp.AsyncResolver(timeout=1.0, tries=2),
-        limit=1,
-        ttl_dns_cache=300,
-    )
-    timeout = aiohttp.ClientTimeout(total=3.0, connect=2.0, sock_read=2.0)
-    trace_config = aiohttp.TraceConfig()
-
-    async def on_dns_start(_session, _context, _params):
-        logger.warning("JWKS_ASYNC_DNS_START")
-
-    async def on_dns_end(_session, _context, _params):
-        logger.warning("JWKS_ASYNC_DNS_COMPLETE")
-
-    async def on_connection_start(_session, _context, _params):
-        logger.warning("JWKS_ASYNC_TCP_CONNECT_START")
-
-    async def on_connection_end(_session, _context, _params):
-        logger.warning("JWKS_ASYNC_TCP_CONNECT_COMPLETE")
-
-    trace_config.on_dns_resolvehost_start.append(on_dns_start)
-    trace_config.on_dns_resolvehost_end.append(on_dns_end)
-    trace_config.on_connection_create_start.append(on_connection_start)
-    trace_config.on_connection_create_end.append(on_connection_end)
-    logger.warning("JWKS_ASYNC_RESOLVER_INIT_COMPLETE")
-    async with aiohttp.ClientSession(
-        connector=connector,
-        timeout=timeout,
-        trust_env=True,
-        trace_configs=[trace_config],
-    ) as client:
-        for attempt in range(2):
-            logger.warning("JWKS_ASYNC_HTTP_REQUEST_START attempt=%s", attempt + 1)
-            try:
-                async with client.get(jwks_url, allow_redirects=False) as response:
-                    response.raise_for_status()
-                    if response.status != 200:
-                        raise ValueError("Supabase JWKS endpoint returned a non-200 response.")
-                    jwks = await response.json()
-                keys = jwks.get("keys") if isinstance(jwks, dict) else None
-                if not isinstance(keys, list):
-                    raise ValueError("Supabase JWKS response has an invalid keys field.")
-                logger.warning("JWKS_ASYNC_HTTP_RESPONSE_VALID")
-                return keys
-            except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
-                if attempt == 1:
-                    raise
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-            except aiohttp.ClientResponseError as exc:
-                if exc.status < 500 or attempt == 1:
-                    raise
-                await asyncio.sleep(random.uniform(0.05, 0.15))
-
-    raise RuntimeError("Supabase JWKS async resolver retry limit exceeded.")
-
-
-def _fetch_supabase_jwks_with_async_resolver(jwks_url: str) -> list:
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(asyncio.wait_for(
-            _fetch_supabase_jwks_async(jwks_url),
-            timeout=_JWKS_ASYNC_FETCH_TIMEOUT_SECONDS,
-        ))
-    raise RuntimeError("Async JWKS fallback cannot run inside an active event loop.")
 
 
 def _exception_chain(exc: BaseException) -> list[BaseException]:
@@ -215,150 +138,6 @@ def _log_jwks_failure(exc: BaseException, attempt: int, will_retry: bool) -> Non
     )
 
 
-def _resolve_supabase_addresses(hostname: str, timeout: float = 0.3) -> tuple[dict[str, Any], list[tuple]]:
-    result_queue: queue.Queue = queue.Queue(maxsize=1)
-
-    def resolve() -> None:
-        try:
-            result_queue.put((socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM), None))
-        except Exception as exc:
-            result_queue.put((None, exc))
-
-    # getaddrinfo has no timeout argument, so isolate it from the request thread.
-    threading.Thread(target=resolve, name="supabase-jwks-dns-probe", daemon=True).start()
-    try:
-        records, error = result_queue.get(timeout=timeout)
-    except queue.Empty:
-        return {"status": "timeout", "addresses": []}, []
-    if error is not None:
-        return {"status": "failed", "failure": _jwks_failure_details(error), "addresses": []}, []
-
-    addresses = []
-    candidates = []
-    seen = set()
-    for family, socktype, proto, _, sockaddr in records:
-        ip_address = sockaddr[0]
-        identity = (family, socktype, proto, ip_address)
-        if identity in seen:
-            continue
-        seen.add(identity)
-        addresses.append({
-            "family": socket.AddressFamily(family).name,
-            "socket_type": socket.SocketKind(socktype).name,
-            "ip": ip_address,
-        })
-        candidates.append((family, socktype, proto, sockaddr))
-        if len(candidates) == 8:
-            break
-    return {
-        "status": "ok",
-        "addresses": addresses,
-        "truncated": len(records) > len(candidates),
-    }, candidates
-
-
-def _probe_direct_socket(
-    family: int,
-    socktype: int,
-    proto: int,
-    sockaddr: tuple,
-    hostname: str,
-    use_tls: bool,
-) -> dict[str, Any]:
-    raw_socket = None
-    try:
-        raw_socket = socket.socket(family, socktype, proto)
-        raw_socket.settimeout(0.2)
-        raw_socket.connect(sockaddr)
-        if use_tls:
-            tls_socket = ssl.create_default_context().wrap_socket(raw_socket, server_hostname=hostname)
-            raw_socket = None
-            with tls_socket:
-                tls_socket.settimeout(0.2)
-                tls_socket.do_handshake()
-        return {"status": "ok"}
-    except Exception as exc:
-        return {"status": "failed", "failure": _jwks_failure_details(exc)}
-    finally:
-        if raw_socket is not None:
-            raw_socket.close()
-
-
-def _probe_supabase_network(jwks_url: str) -> dict[str, Any]:
-    hostname = urlsplit(jwks_url).hostname
-    if not hostname:
-        return {"status": "invalid_supabase_hostname"}
-
-    dns_result, addresses = _resolve_supabase_addresses(hostname)
-    result: dict[str, Any] = {
-        "hostname": hostname,
-        "dns": dns_result,
-        "direct_tcp": [],
-        "direct_tls": [],
-        "httpx": None,
-    }
-    for family, socktype, proto, sockaddr in addresses[:2]:
-        target = sockaddr[0]
-        tcp_result = _probe_direct_socket(family, socktype, proto, sockaddr, hostname, False)
-        result["direct_tcp"].append({"ip": target, **tcp_result})
-        if tcp_result["status"] == "ok":
-            tls_result = _probe_direct_socket(family, socktype, proto, sockaddr, hostname, True)
-            result["direct_tls"].append({"ip": target, **tls_result})
-
-    try:
-        with httpx.Client(
-            timeout=httpx.Timeout(connect=0.35, read=0.35, write=0.2, pool=0.15),
-            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
-            trust_env=True,
-        ) as client:
-            with client.stream("GET", jwks_url) as response:
-                http_status = response.status_code
-        result["httpx"] = {"status": "response", "http_status": http_status}
-    except Exception as exc:
-        result["httpx"] = {"status": "failed", "failure": _jwks_failure_details(exc)}
-    result["proxy_environment"] = {
-        "HTTP_PROXY": bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")),
-        "HTTPS_PROXY": bool(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")),
-        "ALL_PROXY": bool(os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")),
-        "NO_PROXY": bool(os.environ.get("NO_PROXY") or os.environ.get("no_proxy")),
-    }
-    return result
-
-
-def _run_supabase_network_diagnostic(jwks_url: str) -> None:
-    global _jwks_diagnostic_started
-
-    with _jwks_diagnostic_lock:
-        if _jwks_diagnostic_started:
-            logger.warning("JWKS_DIAGNOSTIC_SKIP reason=already_run")
-            return
-        _jwks_diagnostic_started = True
-
-    try:
-        result = _probe_supabase_network(jwks_url)
-        logger.warning("Temporary Supabase JWKS network diagnostic: %s", result)
-    except Exception as exc:
-        logger.warning(
-            "Temporary Supabase JWKS network diagnostic failed: %s\n%s",
-            _jwks_failure_details(exc),
-            _safe_traceback(exc),
-        )
-
-
-def _run_jwks_diagnostic_safely(jwks_url: str) -> None:
-    logger.warning("JWKS_DIAGNOSTIC_START")
-    try:
-        _run_supabase_network_diagnostic(jwks_url)
-    except Exception as exc:
-        logger.warning(
-            "JWKS_DIAGNOSTIC_ERROR: %s\n%s",
-            _jwks_failure_details(exc),
-            _safe_traceback(exc),
-        )
-    finally:
-        logger.warning("JWKS_DIAGNOSTIC_COMPLETE")
-
-
 def _discard_jwks_client() -> None:
     global _jwks_client
 
@@ -366,6 +145,17 @@ def _discard_jwks_client() -> None:
     _jwks_client = None
     if client is not None:
         client.close()
+
+
+def _discard_jwks_client_after_failure() -> None:
+    try:
+        _discard_jwks_client()
+    except Exception as cleanup_exc:
+        logger.warning(
+            "JWKS_CLIENT_CLEANUP_ERROR: %s\n%s",
+            _jwks_failure_details(cleanup_exc),
+            _safe_traceback(cleanup_exc),
+        )
 
 
 def _get_supabase_jwks(force_refresh: bool = False) -> list:
@@ -395,45 +185,18 @@ def _get_supabase_jwks(force_refresh: bool = False) -> list:
             except httpx.HTTPStatusError as exc:
                 will_retry = exc.response.status_code >= 500 and attempt == 0
                 _log_jwks_failure(exc, attempt, will_retry)
+                _discard_jwks_client_after_failure()
                 if will_retry:
-                    _discard_jwks_client()
                     time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
                     continue
-                _discard_jwks_client()
                 raise
             except (httpx.TransportError, OSError) as exc:
                 will_retry = attempt == 0
                 _log_jwks_failure(exc, attempt, will_retry)
+                _discard_jwks_client_after_failure()
                 if will_retry:
-                    _discard_jwks_client()
                     time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
                     continue
-                try:
-                    _discard_jwks_client()
-                except Exception as cleanup_exc:
-                    logger.warning(
-                        "JWKS_CLIENT_CLEANUP_ERROR: %s\n%s",
-                        _jwks_failure_details(cleanup_exc),
-                        _safe_traceback(cleanup_exc),
-                    )
-                logger.warning("JWKS_ASYNC_RESOLVER_FALLBACK_START")
-                try:
-                    keys = _fetch_supabase_jwks_with_async_resolver(jwks_url)
-                except Exception as fallback_exc:
-                    logger.warning(
-                        "JWKS_ASYNC_RESOLVER_FALLBACK_COMPLETE status=failed details=%s\n%s",
-                        _jwks_failure_details(fallback_exc),
-                        _safe_traceback(fallback_exc),
-                    )
-                else:
-                    _jwks_cache.update({
-                        "url": jwks_url,
-                        "keys": keys,
-                        "expires_at": time.monotonic() + 480,
-                    })
-                    logger.warning("JWKS_ASYNC_RESOLVER_FALLBACK_COMPLETE status=success")
-                    return keys
-                _run_jwks_diagnostic_safely(jwks_url)
                 raise
             except Exception as exc:
                 _log_jwks_failure(exc, attempt, False)

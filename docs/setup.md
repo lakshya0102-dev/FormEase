@@ -72,30 +72,17 @@ npm run dev
 
 The Supabase anon/publishable key is browser-visible by design; RLS must remain enabled. Never configure the service-role or OpenRouter key in the frontend.
 
-## Deployment: Vercel multi-service + Supabase
+## Production deployment: Render backend + Vercel frontend
 
-The root [`vercel.json`](../vercel.json) configures two services in one Vercel project:
+The Python 3.12 Vercel runtime repeatedly failed while resolving the configured Supabase hostname: both `socket.getaddrinfo()` and aiohttp/c-ares returned `OSError` errno 16 before TCP/TLS or an HTTP response. The production topology therefore keeps Next.js on Vercel and runs FastAPI in the Docker service described by [`render.yaml`](../render.yaml). This avoids running JWT key retrieval in the affected Python runtime; it does not change JWT verification.
 
-- `backend` builds the FastAPI application from `backend/` and receives `/api/*` requests.
-- `frontend` builds the Next.js application from `frontend/` and receives all remaining paths.
+1. Create a Render Blueprint from this repository. The `formease-api` service uses the root [`Dockerfile`](../Dockerfile), exposes `/api/v1/health` as its health check, and sets the production frontend URL/CORS origin.
+2. In Render, supply the prompted backend-only values: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, and `SUPABASE_SERVICE_ROLE_KEY`. Set `SUPABASE_JWT_SECRET` only if the project still issues legacy HS256 tokens. Never put these values in Vercel frontend variables. Wait for the Render health check to pass and note the service’s actual public URL.
+3. In Vercel, keep the repository root as the project root and set `NEXT_PUBLIC_API_URL` to `<Render service URL>/api/v1` for Production (for example, `https://formease-api.onrender.com/api/v1` if that is the service URL). Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` as before. Redeploy the frontend so the public API URL is included in its build.
+4. Add `https://formease-virid.vercel.app` to Supabase Auth's allowed redirect URLs and Site URL if not already present.
+5. Verify the Render `/api/v1/health` endpoint, then verify the Vercel app reaches it; test both an invalid JWT (must return 401 after a successful JWKS retrieval) and an existing authenticated session (document listing must return successfully).
 
-The frontend calls `/api/v1` on the same origin, and the top-level rewrite routes those requests to FastAPI without a service binding. The browser—not one Vercel service function—makes these API requests, so there is no internal service-to-service call to bind.
-
-1. Import the repository into Vercel with the repository root as the project root so Vercel can read the root `vercel.json`.
-2. Set the frontend's `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` for Production and Preview. Do not set `NEXT_PUBLIC_API_URL` in Vercel; the frontend uses the same-origin `/api/v1` path. Keep the anon/publishable key public by design.
-3. Configure the backend service's environment with `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_JWT_SECRET` if the project uses legacy HS256 tokens. Set `AI_PROVIDER=openrouter`; keep server credentials out of frontend variables.
-4. Add `https://formease-virid.vercel.app` to Supabase Auth's allowed redirect URLs and set it as the Site URL. Same-origin API requests do not require CORS; configure `CORS_ORIGINS` if other browser origins will call the backend directly.
-5. Deploy and verify `https://formease-virid.vercel.app/api/v1/health` returns `{"status":"ok",...}`.
-
-### Alternative: Render backend + Vercel frontend
-
-The existing [`render.yaml`](../render.yaml) remains available for running the Docker backend on Render:
-
-1. Create a Render Blueprint from the repository, or create a Docker web service with the repository root as Docker context and the root `Dockerfile`.
-2. Configure the backend variables in Render, including `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, Supabase credentials, `FRONTEND_URL=https://formease-virid.vercel.app`, and the matching origin in `CORS_ORIGINS`.
-3. For this split deployment only, set Vercel's `NEXT_PUBLIC_API_URL` to `https://<service>.onrender.com/api/v1` and deploy the frontend from `frontend/` as a separate Vercel project.
-
-The Render free service can sleep, restart, and has ephemeral storage; all user files must remain in Supabase Storage. Vercel function request/runtime limits and Supabase/OpenRouter quotas also apply. No uploaded file should be relied on as durable local storage.
+The Render free service can sleep after inactivity and has ephemeral local storage; cold starts may take about a minute. Supabase remains the durable store for all documents and data. For an always-on production service, select a paid Render instance only after approving its cost. Never rely on local backend files for user data.
 
 ## Local verification commands
 
