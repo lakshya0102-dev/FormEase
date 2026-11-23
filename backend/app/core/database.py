@@ -5,8 +5,8 @@ Ensures concurrency-safe, request-scoped client initialization with the authenti
 """
 from typing import Optional
 from fastapi import HTTPException, Depends, status
-from backend.app.core.config import settings
-from backend.app.core.security import get_current_user
+from .config import settings
+from .security import get_current_user
 
 _mock_client_override = None
 _service_role_client = None

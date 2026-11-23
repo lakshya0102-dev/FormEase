@@ -5,15 +5,15 @@ Handles document validation, file ingestion, text extraction, chunking, and stor
 from typing import Dict, Any, List, Optional
 import os
 import uuid
-from backend.app.core.config import settings
-from backend.app.processors.extractor import (
+from ..core.config import settings
+from ..processors.extractor import (
     extract_pdf,
     extract_docx,
     extract_txt,
     extract_pasted_text,
     DocumentExtractionResult
 )
-from backend.app.processors.chunker import chunk_document, DocumentChunk
+from ..processors.chunker import chunk_document, DocumentChunk
 
 class DocumentService:
     @staticmethod

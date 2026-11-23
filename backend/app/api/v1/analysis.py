@@ -10,15 +10,15 @@ Maintains valid document_status enum transitions ('pending' -> 'processing' -> '
 from typing import Optional
 import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
-from backend.app.core.security import get_current_user
-from backend.app.core.database import get_user_db
-from backend.app.schemas.common import AnalyzeRequest, RefinementRequest
-from backend.app.services.analysis_service import (
+from ...core.security import get_current_user
+from ...core.database import get_user_db
+from ...schemas.common import AnalyzeRequest, RefinementRequest
+from ...services.analysis_service import (
     analysis_service,
     is_generic_placeholder_text,
     normalize_process_flow,
 )
-from backend.app.processors.extractor import DocumentExtractionResult, ExtractedSection
+from ...processors.extractor import DocumentExtractionResult, ExtractedSection
 import uuid
 import datetime
 

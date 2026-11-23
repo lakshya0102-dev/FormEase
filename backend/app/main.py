@@ -5,15 +5,15 @@ Configures CORS, middleware, API v1 routes, and exception handling.
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from backend.app.core.config import settings
+from .core.config import settings
 
 # Router imports
-from backend.app.api.v1.health import router as health_router
-from backend.app.api.v1.documents import router as documents_router
-from backend.app.api.v1.analysis import router as analysis_router
-from backend.app.api.v1.chat import router as chat_router
-from backend.app.api.v1.annotations import router as annotations_router
-from backend.app.api.v1.export import router as export_router
+from .api.v1.health import router as health_router
+from .api.v1.documents import router as documents_router
+from .api.v1.analysis import router as analysis_router
+from .api.v1.chat import router as chat_router
+from .api.v1.annotations import router as annotations_router
+from .api.v1.export import router as export_router
 
 app = FastAPI(
     title=settings.PROJECT_NAME,

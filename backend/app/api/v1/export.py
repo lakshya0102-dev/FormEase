@@ -5,9 +5,9 @@ Uses request-scoped authenticated Supabase client carrying the user's verified J
 Generates PDF and Markdown exports.
 """
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from backend.app.core.security import get_current_user
-from backend.app.core.database import get_user_db
-from backend.app.services.exporter import export_service
+from ...core.security import get_current_user
+from ...core.database import get_user_db
+from ...services.exporter import export_service
 
 router = APIRouter()
 

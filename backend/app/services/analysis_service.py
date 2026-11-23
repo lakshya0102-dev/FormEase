@@ -12,8 +12,8 @@ Orchestrates multi-component document simplification via the configured AI provi
 from typing import Dict, Any, List, Optional, Callable, Awaitable
 import uuid
 import re
-from backend.app.ai.ollama_client import ollama_client
-from backend.app.ai.prompts import (
+from ..ai.ollama_client import ollama_client
+from ..ai.prompts import (
     build_batched_analysis_prompt,
     build_combined_modules_prompt,
     build_focused_module_prompt,
@@ -21,8 +21,8 @@ from backend.app.ai.prompts import (
     build_section_explanation_prompt,
     build_summary_prompt,
 )
-from backend.app.processors.extractor import DocumentExtractionResult
-from backend.app.core.config import settings
+from ..processors.extractor import DocumentExtractionResult
+from ..core.config import settings
 
 def _analysis_text_parts(text: str, limit: int = 4200) -> List[str]:
     """Split document text into bounded, paragraph-aware model contexts."""

@@ -6,7 +6,7 @@ Retains page numbers, reading order, and handles extraction warnings safely.
 from typing import List, Dict, Any, Optional
 import io
 import re
-from backend.app.core.config import settings
+from ..core.config import settings
 
 class ExtractedSection:
     def __init__(self, heading: str, text: str, page_number: int = 1):

@@ -3,9 +3,9 @@ Health and AI status endpoints for FormEase.
 Checks backend uptime and the configured AI provider/model readiness.
 """
 from fastapi import APIRouter
-from backend.app.core.config import settings
-from backend.app.ai.ollama_client import ollama_client
-from backend.app.schemas.common import HealthResponse, AIStatusResponse
+from ...core.config import settings
+from ...ai.ollama_client import ollama_client
+from ...schemas.common import HealthResponse, AIStatusResponse
 
 router = APIRouter()
 

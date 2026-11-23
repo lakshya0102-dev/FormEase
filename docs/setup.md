@@ -72,34 +72,30 @@ npm run dev
 
 The Supabase anon/publishable key is browser-visible by design; RLS must remain enabled. Never configure the service-role or OpenRouter key in the frontend.
 
-## Deployment: Vercel + Render + Supabase
+## Deployment: Vercel multi-service + Supabase
 
-### 1. Deploy FastAPI to Render
+The root [`vercel.json`](../vercel.json) configures two services in one Vercel project:
 
-1. Push the repository to a Git provider that Render can access.
-2. In Render choose **New → Blueprint** and select the repository containing [`render.yaml`](../render.yaml), or create a Docker web service with the repository root as Docker context and the root `Dockerfile`.
-3. Choose the Free instance for a no-cost demo.
-4. In Render's environment settings enter the requested backend variables: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET` if needed, `FRONTEND_URL`, and `CORS_ORIGINS`. Keep secrets in Render's backend environment only. For the free fallback leave `OPENROUTER_FREE_FALLBACK_MODELS` at its default or set a verified `:free` ID.
-5. `render.yaml` configures `/api/v1/health` as the health check. After deployment, confirm `https://<service>.onrender.com/api/v1/health` returns `{"status":"ok",...}`. The first request after idle may wait roughly a minute.
+- `backend` builds the FastAPI application from `backend/` and receives `/api/*` requests.
+- `frontend` builds the Next.js application from `frontend/` and receives all remaining paths.
 
-The container installs Tesseract English and Hindi data. No uploaded file is written for long-term storage to the container filesystem; originals are stored in the Supabase private bucket.
+The frontend calls `/api/v1` on the same origin, and the top-level rewrite routes those requests to FastAPI without a service binding. The browser—not one Vercel service function—makes these API requests, so there is no internal service-to-service call to bind.
 
-### 2. Deploy Next.js to Vercel
+1. Import the repository into Vercel with the repository root as the project root so Vercel can read the root `vercel.json`.
+2. Set the frontend's `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` for Production and Preview. Do not set `NEXT_PUBLIC_API_URL` in Vercel; the frontend uses the same-origin `/api/v1` path. Keep the anon/publishable key public by design.
+3. Configure the backend service's environment with `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_JWT_SECRET` if the project uses legacy HS256 tokens. Set `AI_PROVIDER=openrouter`; keep server credentials out of frontend variables.
+4. Add the Vercel origin to Supabase Auth's allowed redirect URLs and set the Site URL. Same-origin API requests do not require CORS; configure `CORS_ORIGINS` if other browser origins will call the backend directly.
+5. Deploy and verify `https://<your-vercel-domain>/api/v1/health` returns `{"status":"ok",...}`.
 
-1. Import the repository into Vercel and set the project root to `frontend`.
-2. Add these environment variables for Production and Preview as needed:
-   - `NEXT_PUBLIC_API_URL=https://<service>.onrender.com/api/v1`
-   - `NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co`
-   - `NEXT_PUBLIC_SUPABASE_ANON_KEY=<publishable-or-anon-key>`
-3. Deploy and copy the actual Vercel URL.
+### Alternative: Render backend + Vercel frontend
 
-### 3. Set production CORS and Supabase URLs
+The existing [`render.yaml`](../render.yaml) remains available for running the Docker backend on Render:
 
-1. Set Render `FRONTEND_URL` and `CORS_ORIGINS` to the exact Vercel origin (for example, `https://formease.vercel.app`; no trailing slash for CORS).
-2. Add the Vercel origin to Supabase Auth's allowed redirect URLs and set the Site URL.
-3. Redeploy Render and Vercel after changing environment variables.
+1. Create a Render Blueprint from the repository, or create a Docker web service with the repository root as Docker context and the root `Dockerfile`.
+2. Configure the backend variables in Render, including `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, Supabase credentials, `FRONTEND_URL`, and `CORS_ORIGINS`.
+3. For this split deployment only, set Vercel's `NEXT_PUBLIC_API_URL` to `https://<service>.onrender.com/api/v1` and deploy the frontend from `frontend/` as a separate Vercel project.
 
-Vercel and Render provide HTTPS endpoints. The free Render service is subject to sleeping/restarts, has no durable local storage, and may be resource-constrained for large OCR scans or long analysis requests. Supabase free-tier quotas and OpenRouter free-model rate limits also apply. If free service limits prevent a full demo, the safe fallback is to run FastAPI locally while keeping frontend and persistence hosted; no paid AI/model fallback is required.
+The Render free service can sleep, restart, and has ephemeral storage; all user files must remain in Supabase Storage. Vercel function request/runtime limits and Supabase/OpenRouter quotas also apply. No uploaded file should be relied on as durable local storage.
 
 ## Local verification commands
 

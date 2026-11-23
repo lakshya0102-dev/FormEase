@@ -11,7 +11,7 @@ import re
 import time
 import random
 from email.utils import parsedate_to_datetime
-from backend.app.core.config import settings
+from ..core.config import settings
 
 class OllamaClient:
     def __init__(self, base_url: str = None, model: str = None):

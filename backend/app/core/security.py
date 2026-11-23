@@ -12,7 +12,7 @@ from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from jose import jwt, JWTError, ExpiredSignatureError
-from backend.app.core.config import settings
+from .config import settings
 
 security_scheme = HTTPBearer(auto_error=False)
 _jwks_cache: Dict[str, Any] = {"keys": [], "expires_at": 0.0, "url": ""}

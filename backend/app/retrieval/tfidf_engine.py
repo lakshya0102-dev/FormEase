@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from backend.app.core.config import settings
+from ..core.config import settings
 
 class RetrievedPassage:
     def __init__(

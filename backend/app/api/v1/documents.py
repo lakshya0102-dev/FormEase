@@ -6,10 +6,10 @@ Enforces strict user ownership and PostgreSQL document_status enum compliance.
 """
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response, status
-from backend.app.core.security import get_current_user
-from backend.app.core.database import get_user_db
-from backend.app.core.config import settings
-from backend.app.services.document_service import document_service
+from ...core.security import get_current_user
+from ...core.database import get_user_db
+from ...core.config import settings
+from ...services.document_service import document_service
 import uuid
 import datetime
 

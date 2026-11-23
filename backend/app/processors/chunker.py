@@ -6,7 +6,7 @@ Splits extracted sections into manageable chunks while preserving:
 - Token count approximation and configurable overlap
 """
 from typing import List, Dict, Any
-from backend.app.processors.extractor import DocumentExtractionResult, ExtractedSection
+from .extractor import DocumentExtractionResult, ExtractedSection
 
 class DocumentChunk:
     def __init__(

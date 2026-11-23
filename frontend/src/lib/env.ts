@@ -4,7 +4,7 @@ function normalizeOptionalEnv(value: string | undefined): string | undefined {
 }
 
 export const frontendEnv = {
-  apiUrl: (normalizeOptionalEnv(process.env.NEXT_PUBLIC_API_URL) ?? 'http://localhost:8000/api/v1').replace(/\/$/, ''),
+  apiUrl: (normalizeOptionalEnv(process.env.NEXT_PUBLIC_API_URL) ?? '/api/v1').replace(/\/$/, ''),
   supabaseUrl: normalizeOptionalEnv(process.env.NEXT_PUBLIC_SUPABASE_URL),
   supabaseAnonKey: normalizeOptionalEnv(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
 };
