@@ -14,6 +14,7 @@ import uuid
 import datetime
 
 router = APIRouter()
+VERCEL_UPLOAD_LIMIT_BYTES = 18 * 1024 * 1024
 
 @router.post("/upload")
 async def upload_document(
@@ -23,7 +24,8 @@ async def upload_document(
 ):
     # Enforce the configured limit while reading, not after buffering an
     # arbitrarily large request into memory.
-    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    max_bytes = min(settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024, VERCEL_UPLOAD_LIMIT_BYTES)
+    max_size_mb = max_bytes // (1024 * 1024)
     contents_buffer = bytearray()
     while True:
         chunk = await file.read(min(64 * 1024, max_bytes + 1 - len(contents_buffer)))
@@ -33,7 +35,7 @@ async def upload_document(
         if len(contents_buffer) > max_bytes:
             raise HTTPException(
                 status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-                detail=f"File exceeds the {settings.MAX_UPLOAD_SIZE_MB} MB upload limit."
+                detail=f"File exceeds the {max_size_mb} MB upload limit."
             )
     contents = bytes(contents_buffer)
     file_name = file.filename or "uploaded-file"

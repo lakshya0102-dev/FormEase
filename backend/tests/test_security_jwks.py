@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import socket
@@ -217,9 +218,11 @@ def test_async_resolver_uses_aiohttp_cares_connector_and_bounded_retry(monkeypat
     session_instances = []
     connector_options = []
     resolver_instances = []
+    resolver_options = []
 
     class FakeResolver:
-        def __init__(self):
+        def __init__(self, **kwargs):
+            resolver_options.append(kwargs)
             resolver_instances.append(self)
 
     class FakeConnector:
@@ -278,6 +281,23 @@ def test_async_resolver_uses_aiohttp_cares_connector_and_bounded_retry(monkeypat
     assert connector_options[0]["resolver"] is resolver_instances[0]
     assert connector_options[0]["limit"] == 1
     assert connector_options[0]["ttl_dns_cache"] == 300
+    assert resolver_options == [{"timeout": 1.0, "tries": 2}]
+
+
+def test_async_resolver_fallback_has_an_overall_timeout(monkeypatch):
+    async def hang_forever(_url):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(security, "_JWKS_ASYNC_FETCH_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(security, "_fetch_supabase_jwks_async", hang_forever)
+    started = time.monotonic()
+
+    with pytest.raises(asyncio.TimeoutError):
+        security._fetch_supabase_jwks_with_async_resolver(
+            f"{PROJECT_URL}/auth/v1/.well-known/jwks.json",
+        )
+
+    assert time.monotonic() - started < 0.5
 
 
 def test_concurrent_cache_misses_share_one_jwks_request(monkeypatch):

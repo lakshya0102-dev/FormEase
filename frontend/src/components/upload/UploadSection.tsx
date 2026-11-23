@@ -137,7 +137,7 @@ export const UploadSection: React.FC<UploadSectionProps> = ({ onDocumentReadyFor
               Drag & Drop your documents here, or <span className="text-brand-600 dark:text-brand-400">Browse files</span>
             </h3>
             <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
-              Supports PDF, DOCX, TXT documents up to 100 MB.
+              Supports PDF, DOCX, TXT documents up to 18 MB.
             </p>
           </div>
 

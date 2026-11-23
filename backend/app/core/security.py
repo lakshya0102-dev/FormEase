@@ -32,6 +32,7 @@ _jwks_lock = threading.Lock()
 _jwks_client: Optional[httpx.Client] = None
 _jwks_diagnostic_lock = threading.Lock()
 _jwks_diagnostic_started = False
+_JWKS_ASYNC_FETCH_TIMEOUT_SECONDS = 7.0
 
 
 def _create_jwks_client() -> httpx.Client:
@@ -47,18 +48,40 @@ def _create_jwks_client() -> httpx.Client:
 
 
 async def _fetch_supabase_jwks_async(jwks_url: str) -> list:
+    logger.warning("JWKS_ASYNC_RESOLVER_INIT_START")
     connector = aiohttp.TCPConnector(
-        resolver=aiohttp.AsyncResolver(),
+        resolver=aiohttp.AsyncResolver(timeout=1.0, tries=2),
         limit=1,
         ttl_dns_cache=300,
     )
-    timeout = aiohttp.ClientTimeout(total=4.0, connect=2.0, sock_read=3.0)
+    timeout = aiohttp.ClientTimeout(total=3.0, connect=2.0, sock_read=2.0)
+    trace_config = aiohttp.TraceConfig()
+
+    async def on_dns_start(_session, _context, _params):
+        logger.warning("JWKS_ASYNC_DNS_START")
+
+    async def on_dns_end(_session, _context, _params):
+        logger.warning("JWKS_ASYNC_DNS_COMPLETE")
+
+    async def on_connection_start(_session, _context, _params):
+        logger.warning("JWKS_ASYNC_TCP_CONNECT_START")
+
+    async def on_connection_end(_session, _context, _params):
+        logger.warning("JWKS_ASYNC_TCP_CONNECT_COMPLETE")
+
+    trace_config.on_dns_resolvehost_start.append(on_dns_start)
+    trace_config.on_dns_resolvehost_end.append(on_dns_end)
+    trace_config.on_connection_create_start.append(on_connection_start)
+    trace_config.on_connection_create_end.append(on_connection_end)
+    logger.warning("JWKS_ASYNC_RESOLVER_INIT_COMPLETE")
     async with aiohttp.ClientSession(
         connector=connector,
         timeout=timeout,
         trust_env=True,
+        trace_configs=[trace_config],
     ) as client:
         for attempt in range(2):
+            logger.warning("JWKS_ASYNC_HTTP_REQUEST_START attempt=%s", attempt + 1)
             try:
                 async with client.get(jwks_url, allow_redirects=False) as response:
                     response.raise_for_status()
@@ -68,6 +91,7 @@ async def _fetch_supabase_jwks_async(jwks_url: str) -> list:
                 keys = jwks.get("keys") if isinstance(jwks, dict) else None
                 if not isinstance(keys, list):
                     raise ValueError("Supabase JWKS response has an invalid keys field.")
+                logger.warning("JWKS_ASYNC_HTTP_RESPONSE_VALID")
                 return keys
             except (aiohttp.ClientConnectionError, asyncio.TimeoutError):
                 if attempt == 1:
@@ -85,7 +109,10 @@ def _fetch_supabase_jwks_with_async_resolver(jwks_url: str) -> list:
     try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(_fetch_supabase_jwks_async(jwks_url))
+        return asyncio.run(asyncio.wait_for(
+            _fetch_supabase_jwks_async(jwks_url),
+            timeout=_JWKS_ASYNC_FETCH_TIMEOUT_SECONDS,
+        ))
     raise RuntimeError("Async JWKS fallback cannot run inside an active event loop.")
 
 

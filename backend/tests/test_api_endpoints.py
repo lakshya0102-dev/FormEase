@@ -119,6 +119,32 @@ class TestAPIEndpoints(unittest.TestCase):
         finally:
             settings.MAX_UPLOAD_SIZE_MB = original_limit
 
+    def test_vercel_upload_respects_platform_request_body_limit(self):
+        from backend.app.api.v1.documents import upload_document
+
+        class OversizedUpload:
+            filename = "oversized.txt"
+            content_type = "text/plain"
+
+            def __init__(self):
+                self.remaining = 18 * 1024 * 1024 + 1
+
+            async def read(self, size):
+                chunk_size = min(size, self.remaining)
+                self.remaining -= chunk_size
+                return b"x" * chunk_size
+
+        original_limit = settings.MAX_UPLOAD_SIZE_MB
+        settings.MAX_UPLOAD_SIZE_MB = 100
+        try:
+            import asyncio
+            with self.assertRaises(HTTPException) as error:
+                asyncio.run(upload_document(OversizedUpload(), {"id": self.user_a_id}, MagicMock()))
+            self.assertEqual(error.exception.status_code, 413)
+            self.assertEqual(error.exception.detail, "File exceeds the 18 MB upload limit.")
+        finally:
+            settings.MAX_UPLOAD_SIZE_MB = original_limit
+
     def test_chat_request_rate_limit_is_per_user_and_returns_retry_after(self):
         import asyncio
         from backend.app.api.v1.chat import _check_chat_rate_limit, _chat_request_times
