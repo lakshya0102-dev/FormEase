@@ -7,6 +7,7 @@ from typing import Optional, Dict, Any
 import uuid
 import time
 import threading
+import logging
 import httpx
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -14,11 +15,36 @@ from starlette.concurrency import run_in_threadpool
 from jose import jwt, JWTError, ExpiredSignatureError
 from .config import settings
 
+logger = logging.getLogger(__name__)
 security_scheme = HTTPBearer(auto_error=False)
 _jwks_cache: Dict[str, Any] = {"keys": [], "expires_at": 0.0, "url": ""}
 _jwks_lock = threading.Lock()
+_jwks_client: Optional[httpx.Client] = None
+
+
+def _create_jwks_client() -> httpx.Client:
+    return httpx.Client(
+        timeout=httpx.Timeout(connect=2.0, read=5.0, write=2.0, pool=1.0),
+        limits=httpx.Limits(
+            max_connections=2,
+            max_keepalive_connections=1,
+            keepalive_expiry=5.0,
+        ),
+    )
+
+
+def _discard_jwks_client() -> None:
+    global _jwks_client
+
+    client = _jwks_client
+    _jwks_client = None
+    if client is not None:
+        client.close()
+
 
 def _get_supabase_jwks(force_refresh: bool = False) -> list:
+    global _jwks_client
+
     project_url = settings.SUPABASE_URL.rstrip("/")
     jwks_url = f"{project_url}/auth/v1/.well-known/jwks.json"
     now = time.monotonic()
@@ -29,13 +55,45 @@ def _get_supabase_jwks(force_refresh: bool = False) -> list:
         now = time.monotonic()
         if not force_refresh and _jwks_cache["url"] == jwks_url and now < _jwks_cache["expires_at"]:
             return _jwks_cache["keys"]
-        response = httpx.get(jwks_url, timeout=5.0)
-        response.raise_for_status()
-        keys = response.json().get("keys", [])
-        if not isinstance(keys, list):
-            raise ValueError("Supabase JWKS response has an invalid keys field.")
-        _jwks_cache.update({"url": jwks_url, "keys": keys, "expires_at": now + 480})
-        return keys
+
+        for attempt in range(2):
+            try:
+                if _jwks_client is None:
+                    _jwks_client = _create_jwks_client()
+                response = _jwks_client.get(jwks_url)
+                response.raise_for_status()
+                jwks = response.json()
+                keys = jwks.get("keys") if isinstance(jwks, dict) else None
+                if not isinstance(keys, list):
+                    raise ValueError("Supabase JWKS response has an invalid keys field.")
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code >= 500 and attempt == 0:
+                    logger.warning("Supabase JWKS request failed; retrying once.", exc_info=True)
+                    _discard_jwks_client()
+                    continue
+                logger.exception("Supabase JWKS retrieval failed.")
+                _discard_jwks_client()
+                raise
+            except (httpx.TransportError, OSError):
+                if attempt == 0:
+                    logger.warning("Supabase JWKS request failed; retrying once.", exc_info=True)
+                    _discard_jwks_client()
+                    continue
+                logger.exception("Supabase JWKS retrieval failed.")
+                _discard_jwks_client()
+                raise
+            except Exception:
+                logger.exception("Supabase JWKS retrieval failed.")
+                raise
+
+            _jwks_cache.update({
+                "url": jwks_url,
+                "keys": keys,
+                "expires_at": time.monotonic() + 480,
+            })
+            return keys
+
+        raise RuntimeError("Supabase JWKS retrieval failed.")
 
 def verify_supabase_jwt(token: str) -> Dict[str, Any]:
     """
@@ -83,10 +141,12 @@ def verify_supabase_jwt(token: str) -> Dict[str, Any]:
                     raise JWTError("No trusted Supabase signing key matches this token.")
             except HTTPException:
                 raise
-            except Exception as e:
+            except JWTError:
+                raise
+            except Exception:
                 raise HTTPException(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Unable to retrieve Supabase signing keys: {str(e)}",
+                    detail="Unable to retrieve Supabase signing keys.",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
@@ -107,10 +167,10 @@ def verify_supabase_jwt(token: str) -> Dict[str, Any]:
             detail="Authentication token has expired.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    except JWTError as e:
+    except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid authentication token: {str(e)}",
+            detail="Invalid authentication token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
