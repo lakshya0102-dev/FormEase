@@ -84,15 +84,15 @@ The frontend calls `/api/v1` on the same origin, and the top-level rewrite route
 1. Import the repository into Vercel with the repository root as the project root so Vercel can read the root `vercel.json`.
 2. Set the frontend's `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` for Production and Preview. Do not set `NEXT_PUBLIC_API_URL` in Vercel; the frontend uses the same-origin `/api/v1` path. Keep the anon/publishable key public by design.
 3. Configure the backend service's environment with `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `SUPABASE_JWT_SECRET` if the project uses legacy HS256 tokens. Set `AI_PROVIDER=openrouter`; keep server credentials out of frontend variables.
-4. Add the Vercel origin to Supabase Auth's allowed redirect URLs and set the Site URL. Same-origin API requests do not require CORS; configure `CORS_ORIGINS` if other browser origins will call the backend directly.
-5. Deploy and verify `https://<your-vercel-domain>/api/v1/health` returns `{"status":"ok",...}`.
+4. Add `https://formease-virid.vercel.app` to Supabase Auth's allowed redirect URLs and set it as the Site URL. Same-origin API requests do not require CORS; configure `CORS_ORIGINS` if other browser origins will call the backend directly.
+5. Deploy and verify `https://formease-virid.vercel.app/api/v1/health` returns `{"status":"ok",...}`.
 
 ### Alternative: Render backend + Vercel frontend
 
 The existing [`render.yaml`](../render.yaml) remains available for running the Docker backend on Render:
 
 1. Create a Render Blueprint from the repository, or create a Docker web service with the repository root as Docker context and the root `Dockerfile`.
-2. Configure the backend variables in Render, including `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, Supabase credentials, `FRONTEND_URL`, and `CORS_ORIGINS`.
+2. Configure the backend variables in Render, including `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, Supabase credentials, `FRONTEND_URL=https://formease-virid.vercel.app`, and the matching origin in `CORS_ORIGINS`.
 3. For this split deployment only, set Vercel's `NEXT_PUBLIC_API_URL` to `https://<service>.onrender.com/api/v1` and deploy the frontend from `frontend/` as a separate Vercel project.
 
 The Render free service can sleep, restart, and has ephemeral storage; all user files must remain in Supabase Storage. Vercel function request/runtime limits and Supabase/OpenRouter quotas also apply. No uploaded file should be relied on as durable local storage.
