@@ -104,6 +104,7 @@ def install_clients(monkeypatch, *clients: FakeClient):
 
 @pytest.mark.parametrize("algorithm", ["ES256", "RS256"])
 def test_asymmetric_jwts_are_verified_with_supabase_jwks(monkeypatch, algorithm):
+    monkeypatch.setattr(settings, "SUPABASE_URL", f"{PROJECT_URL}/")
     token, public_jwk = make_asymmetric_token(algorithm)
     client = FakeClient(response_with_keys([public_jwk]))
     install_clients(monkeypatch, client)
@@ -114,6 +115,40 @@ def test_asymmetric_jwts_are_verified_with_supabase_jwks(monkeypatch, algorithm)
     assert payload["iss"] == f"{PROJECT_URL}/auth/v1"
     assert payload["role"] == "authenticated"
     assert client.calls == [f"{PROJECT_URL}/auth/v1/.well-known/jwks.json"]
+
+
+def test_supabase_url_with_rest_path_is_rejected_without_fetching_jwks(monkeypatch, caplog):
+    token, _ = make_asymmetric_token("ES256")
+    client = FakeClient(response_with_keys([]))
+    install_clients(monkeypatch, client)
+    monkeypatch.setattr(settings, "SUPABASE_URL", f"{PROJECT_URL}/rest/v1/")
+    caplog.set_level(logging.ERROR, logger=security.__name__)
+
+    with pytest.raises(HTTPException) as error:
+        security.verify_supabase_jwt(token)
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Unable to retrieve Supabase signing keys."
+    assert client.calls == []
+    assert "expected a project base URL" in caplog.text
+    assert "/rest/v1/" not in caplog.text
+
+
+def test_unauthorized_jwks_response_is_not_retried_or_cached(monkeypatch, caplog):
+    token, _ = make_asymmetric_token("ES256")
+    request = httpx.Request("GET", f"{PROJECT_URL}/auth/v1/.well-known/jwks.json")
+    client = FakeClient(httpx.Response(401, request=request))
+    install_clients(monkeypatch, client)
+    caplog.set_level(logging.ERROR, logger=security.__name__)
+
+    with pytest.raises(HTTPException) as error:
+        security.verify_supabase_jwt(token)
+
+    assert error.value.status_code == 503
+    assert error.value.detail == "Unable to retrieve Supabase signing keys."
+    assert len(client.calls) == 1
+    assert security._jwks_cache == {"keys": [], "expires_at": 0.0, "url": ""}
+    assert "'http_status': 401" in caplog.text
 
 
 def test_jwks_cache_reuses_successful_response(monkeypatch):

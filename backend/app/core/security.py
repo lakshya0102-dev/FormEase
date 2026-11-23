@@ -13,6 +13,7 @@ import random
 import socket
 import traceback
 from collections import deque
+from urllib.parse import urlsplit
 import httpx
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -161,7 +162,21 @@ def _discard_jwks_client_after_failure() -> None:
 def _get_supabase_jwks(force_refresh: bool = False) -> list:
     global _jwks_client
 
-    project_url = settings.SUPABASE_URL.rstrip("/")
+    project_url = settings.SUPABASE_URL.strip().rstrip("/")
+    parsed_project_url = urlsplit(project_url)
+    if (
+        parsed_project_url.scheme not in {"http", "https"}
+        or not parsed_project_url.netloc
+        or parsed_project_url.path
+        or parsed_project_url.query
+        or parsed_project_url.fragment
+    ):
+        logger.error(
+            "Invalid SUPABASE_URL configuration: expected a project base URL "
+            "without a path, query, or fragment."
+        )
+        raise ValueError("SUPABASE_URL must be the Supabase project base URL.")
+
     jwks_url = f"{project_url}/auth/v1/.well-known/jwks.json"
     now = time.monotonic()
     if not force_refresh and _jwks_cache["url"] == jwks_url and now < _jwks_cache["expires_at"]:
