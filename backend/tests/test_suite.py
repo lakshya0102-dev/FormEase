@@ -652,7 +652,8 @@ class TestSecurityAndAuth(unittest.TestCase):
         response = MagicMock()
         response.json.return_value = {"keys": [public_jwk]}
 
-        with patch("backend.app.core.security.httpx.get", return_value=response):
+        with patch("backend.app.core.security._create_jwks_client") as create_client:
+            create_client.return_value.get.return_value = response
             payload = verify_supabase_jwt(token)
 
         self.assertEqual(payload["sub"], user_uuid)

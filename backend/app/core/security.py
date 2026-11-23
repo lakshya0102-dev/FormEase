@@ -8,6 +8,10 @@ import uuid
 import time
 import threading
 import logging
+import os
+import random
+import socket
+import traceback
 import httpx
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -30,6 +34,71 @@ def _create_jwks_client() -> httpx.Client:
             max_keepalive_connections=1,
             keepalive_expiry=5.0,
         ),
+        trust_env=True,
+    )
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain = []
+    seen = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__
+        if current is None and not chain[-1].__suppress_context__:
+            current = chain[-1].__context__
+    return chain
+
+
+def _classify_jwks_failure(exc: BaseException) -> tuple[str, Optional[int], Optional[int]]:
+    chain = _exception_chain(exc)
+    http_error = next((item for item in chain if isinstance(item, httpx.HTTPStatusError)), None)
+    if http_error is not None:
+        return "http_response", None, http_error.response.status_code
+    if any(isinstance(item, httpx.ProxyError) for item in chain):
+        return "proxy", None, None
+    timeout = next((item for item in chain if isinstance(item, httpx.TimeoutException)), None)
+    if timeout is not None:
+        return f"timeout_{type(timeout).__name__.lower()}", None, None
+    if any(isinstance(item, socket.gaierror) for item in chain):
+        return "dns", None, None
+    os_error = next((item for item in chain if isinstance(item, OSError)), None)
+    if os_error is not None or any(isinstance(item, httpx.ConnectError) for item in chain):
+        return "tcp_connect", getattr(os_error, "errno", None), None
+    return "http_transport", None, None
+
+
+def _safe_traceback(exc: BaseException) -> str:
+    lines = []
+    for item in _exception_chain(exc):
+        if item.__traceback__ is not None:
+            lines.append("Traceback (most recent call last):\n")
+            lines.extend(traceback.format_list(traceback.extract_tb(item.__traceback__)))
+        lines.append(f"{type(item).__module__}.{type(item).__qualname__}: <message redacted>\n")
+    return "".join(lines)
+
+
+def _log_jwks_failure(exc: BaseException, attempt: int, will_retry: bool) -> None:
+    phase, os_errno, http_status = _classify_jwks_failure(exc)
+    proxy_environment = {
+        "HTTP_PROXY": bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")),
+        "HTTPS_PROXY": bool(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")),
+        "ALL_PROXY": bool(os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")),
+        "NO_PROXY": bool(os.environ.get("NO_PROXY") or os.environ.get("no_proxy")),
+    }
+    logger.log(
+        logging.WARNING if will_retry else logging.ERROR,
+        "Supabase JWKS retrieval failed: phase=%s error_type=%s attempt=%s retry=%s "
+        "os_errno=%s http_status=%s trust_env=True proxy_environment=%s\n%s",
+        phase,
+        type(exc).__name__,
+        attempt + 1,
+        will_retry,
+        os_errno,
+        http_status,
+        proxy_environment,
+        _safe_traceback(exc),
     )
 
 
@@ -67,23 +136,25 @@ def _get_supabase_jwks(force_refresh: bool = False) -> list:
                 if not isinstance(keys, list):
                     raise ValueError("Supabase JWKS response has an invalid keys field.")
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code >= 500 and attempt == 0:
-                    logger.warning("Supabase JWKS request failed; retrying once.", exc_info=True)
+                will_retry = exc.response.status_code >= 500 and attempt == 0
+                _log_jwks_failure(exc, attempt, will_retry)
+                if will_retry:
                     _discard_jwks_client()
+                    time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
                     continue
-                logger.exception("Supabase JWKS retrieval failed.")
                 _discard_jwks_client()
                 raise
-            except (httpx.TransportError, OSError):
-                if attempt == 0:
-                    logger.warning("Supabase JWKS request failed; retrying once.", exc_info=True)
+            except (httpx.TransportError, OSError) as exc:
+                will_retry = attempt == 0
+                _log_jwks_failure(exc, attempt, will_retry)
+                if will_retry:
                     _discard_jwks_client()
+                    time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
                     continue
-                logger.exception("Supabase JWKS retrieval failed.")
                 _discard_jwks_client()
                 raise
-            except Exception:
-                logger.exception("Supabase JWKS retrieval failed.")
+            except Exception as exc:
+                _log_jwks_failure(exc, attempt, False)
                 raise
 
             _jwks_cache.update({
