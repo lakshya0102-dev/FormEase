@@ -1,166 +1,456 @@
-# FormEase — AI Document Simplifier Platform
+# FormEase – AI Document Simplifier
 
-> **Understand Documents. Simplify Complexity. Step by Step.**
+**Turn complex documents into clear explanations, structured notes, visual diagrams, and interactive learning experiences.**
 
-[![Backend Tests](https://img.shields.io/badge/tests-mocked%20suite-brightgreen.svg)]()
-[![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)]()
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.111-teal.svg)]()
-[![Next.js 14](https://img.shields.io/badge/Next.js-14-black.svg)]()
-[![AI](https://img.shields.io/badge/Inference-OpenRouter%20Free-orange.svg)]()
+FormEase is an AI-powered document analysis platform designed to make learning and understanding complex information easier. Upload a document, analyze its contents, explore concepts through visual diagrams, and interact with your material using AI.
 
-FormEase is a production-minded full-stack web platform designed to simplify complex, lengthy, and bureaucratic documents into structured, accessible, plain-language explanations.
-
----
-
-## 1. Problem Statement & Solution
-
-### The Problem
-Citizens, employees, and patients are routinely overwhelmed by dense legal agreements, bureaucratic government notices, tenancy contracts, medical waivers, and compliance policies. These documents obscure critical deadlines, legal liabilities, and procedural requirements under confusing jargon.
-
-### The FormEase Solution
-FormEase ingests raw PDF, DOCX, TXT documents or pasted text and transforms them into:
-1. **Executive Overview & Summary**: High-level purpose and target audience.
-2. **Section Explorer**: Clause-by-clause translations with explicit risk ratings (Low, Medium, High).
-3. **Procedural Workflows**: Automatic extraction of chronological process steps with switchable Mermaid flowcharts.
-4. **Key Information**: Actionable extraction of critical obligations, deadlines, and penalty clauses.
-5. **Interactive Definitions**: Context-aware jargon glossary.
-6. **Document-Grounded Chatbot**: Ask questions with answers strictly constrained to retrieved evidence passages.
-7. **Export Engine**: Export full analyses to professional PDF and formatted Markdown.
+<p align="center">
+  <a href="https://formease-virid.vercel.app">Live Application</a> •
+  <a href="https://github.com/lakshya0102-dev/FormEase">GitHub Repository</a> •
+  <a href="https://formease-api.onrender.com/api/v1/health">API Health</a>
+</p>
 
 ---
 
-## 2. Free-Model Architecture
+## Overview
 
-The platform keeps model credentials on the backend and:
-- **Free models only**: The backend rejects OpenRouter model IDs that are not free variants. It can fail over to explicitly configured free model IDs only.
-- **Provider boundary**: Browsers never call OpenRouter directly; prompts are sent by FastAPI. Document text leaves the backend for model inference, so this is not on-device processing.
-- **Optional local OCR**: Tesseract reads scanned pages on the backend; it does not use a paid OCR API.
-- **Supabase Authentication & Row Level Security (RLS)**: Enforces multi-tenant data isolation at the PostgreSQL level.
-- **Scikit-Learn TF-IDF Retrieval**: Deterministic, verifiable passage matching for the document chatbot.
-- **Real Supabase Auth**: Email/password sign-in with session tokens forwarded to FastAPI for server-side verification.
+Understanding lengthy technical documents, academic notes, and complex study materials can be time-consuming.
 
-```
-USER BROWSER
-    │
-    ▼ (HTTPS / Responsive Next.js Web)
-NEXT.JS FRONTEND (Vercel)
-    │
-    ▼ (Authenticated REST API / JWT)
-FASTAPI BACKEND
-    │
-    ├── Supabase Authentication & PostgreSQL with RLS
-    ├── Supabase Private Storage (Raw files)
-    ├── Scikit-Learn TF-IDF Retrieval Engine
-    ├── OpenRouter free chat models (server-side only)
-    └── Tesseract OCR (local backend process, scanned pages only)
-```
+FormEase simplifies this process by combining document processing, AI-powered analysis, information retrieval, and interactive visualizations into one platform.
+
+Whether you are studying computer networks, biology, mathematics, machine learning, or business concepts, FormEase helps transform dense material into more understandable learning resources.
+
+## Features
+
+### 1. AI-Powered Document Analysis
+- Upload and analyze learning documents.
+- Extract and process document content.
+- Generate structured explanations and summaries.
+- Break complex information into manageable sections.
+- Support learning across multiple subject areas.
+
+### 2. Interactive Concept Maps
+- Generate visual concept maps from document content.
+- Represent relationships between concepts.
+- Render diagrams using Mermaid.
+- Zoom and explore diagrams interactively.
+
+### 3. Process Flowcharts
+- Convert complex processes into visual flowcharts.
+- Generate step-by-step representations.
+- Make technical workflows easier to understand.
+
+### 4. AI Document Chat
+- Interact with analyzed documents.
+- Ask questions about document content.
+- Retrieve relevant information using document-based context.
+
+### 5. Reference Diagrams
+- Discover relevant external reference images and diagrams.
+- Display source information and attribution where available.
+- Supplement AI-generated explanations with visual references.
+
+### 6. Document Management
+- Manage uploaded documents through the Document Library.
+- Access previously processed documents.
+- Organize and revisit learning materials.
+
+### 7. Authentication and Security
+- Supabase-powered authentication.
+- Individual user accounts.
+- JWT-based authentication and verification.
+- Protected backend API endpoints.
 
 ---
 
-## 3. Technology Stack
+## Technology Stack
 
 | Layer | Technologies |
-| :--- | :--- |
-| **Frontend** | Next.js 14, React 18, TypeScript, Tailwind CSS, Lucide Icons, Mermaid |
-| **Backend API** | Python 3.11, FastAPI, Pydantic, Uvicorn |
-| **AI Inference** | OpenRouter-compatible chat completions with free-only model enforcement |
-| **NLP & Retrieval** | Scikit-learn (TF-IDF vectorizer), NumPy |
-| **Document Parsing** | PyMuPDF (fitz), python-docx, Tesseract OCR (optional system binary) |
-| **Database & Auth** | Supabase PostgreSQL, Supabase Auth, Row Level Security |
-| **Export Generation**| ReportLab (PDF), Markdown |
+|---|---|
+| Frontend | Next.js, React, TypeScript |
+| Styling | Tailwind CSS |
+| Backend | Python, FastAPI |
+| Database | Supabase |
+| Authentication | Supabase Auth, JWT |
+| AI Integration | OpenRouter |
+| Diagram Rendering | Mermaid |
+| Document Processing | Python document-processing libraries |
+| Deployment | Vercel, Render |
+| Version Control | Git, GitHub |
 
 ---
 
-## 4. Project Directory Structure
+## System Architecture
 
+FormEase uses a decoupled full-stack architecture.
+
+```text
+                 USER
+                   |
+                   v
+          NEXT.JS FRONTEND
+              (Vercel)
+                   |
+                   v
+            FASTAPI BACKEND
+               (Render)
+                   |
+          +--------+--------+
+          |        |        |
+          v        v        v
+       SUPABASE  OPENROUTER  DOCUMENT
+       AUTH/DB      AI       PROCESSING
+          |        |        |
+          +--------+--------+
+                   |
+                   v
+          ANALYSIS & RETRIEVAL
+                   |
+          +--------+--------+
+          |                 |
+          v                 v
+     CONCEPT MAPS       FLOWCHARTS
+          |                 |
+          +--------+--------+
+                   |
+                   v
+             USER INTERFACE
 ```
+
+### Production Deployment
+
+| Component | Platform |
+|---|---|
+| Frontend | Vercel |
+| Backend API | Render |
+| Authentication | Supabase Auth |
+| Database | Supabase |
+| AI Services | OpenRouter |
+
+**Live URLs**
+
+- Application: https://formease-virid.vercel.app
+- Backend: https://formease-api.onrender.com
+- Health Check: https://formease-api.onrender.com/api/v1/health
+
+---
+
+## Project Structure
+
+```text
 FormEase/
-├── frontend/                   # Next.js 14 React TypeScript Application
-│   ├── src/
-│   │   ├── app/                # App router (layout.tsx, page.tsx, globals.css)
-│   │   ├── components/         # Modular UI components
-│   │   │   ├── layout/         # Collapsible Sidebar & Header
-│   │   │   ├── dashboard/      # Main dashboard & metrics
-│   │   │   ├── upload/         # Multi-file dropzone & review
-│   │   │   ├── viewer/         # Interactive analysis dashboard & original reader
-│   │   │   ├── chat/           # Evidence-grounded document chatbot
-│   │   │   ├── library/        # Document library & search
-│   │   │   ├── trash/          # Recently Deleted trash view
-│   │   │   └── settings/       # Language (EN/HI), Depth, and configured provider status
-│   │   ├── lib/                # API client & Supabase helpers
-│   │   └── types/              # Shared TypeScript interfaces
-│   ├── package.json
-│   ├── tailwind.config.js
-│   └── tsconfig.json
-├── backend/                    # FastAPI Python Backend
+│
+├── backend/
 │   ├── app/
-│   │   ├── main.py             # FastAPI entrypoint & router configuration
-│   │   ├── core/               # App configuration & Supabase security/JWT
-│   │   ├── api/v1/             # Modular REST endpoints (documents, analysis, chat, export)
-│   │   ├── processors/         # PyMuPDF/docx extractors & recursive chunker
-│   │   ├── retrieval/          # TF-IDF retrieval engine
-│   │   ├── ai/                 # OpenRouter/local Ollama provider client & prompts
-│   │   └── services/           # Document ingestion, analysis orchestrator & export
-│   ├── tests/                  # Comprehensive unit & integration test suite
+│   │   ├── ai/
+│   │   ├── api/
+│   │   ├── core/
+│   │   ├── processors/
+│   │   ├── retrieval/
+│   │   └── services/
+│   │
+│   ├── tests/
 │   └── requirements.txt
-├── Dockerfile                  # FastAPI + English/Hindi Tesseract runtime
-├── render.yaml                 # Free Render backend blueprint
+│
+├── frontend/
+│   ├── public/
+│   ├── src/
+│   │   ├── app/
+│   │   ├── components/
+│   │   └── lib/
+│   │
+│   └── package.json
+│
 ├── database/
-│   ├── schema.sql              # Supabase PostgreSQL schema with RLS & indexes
-│   └── migrations/
-├── docs/                       # University Project Documentation
-│   ├── prompt-engineering.md   # 5-part prompts, iterations, 3-tool attribution
-│   ├── architecture.md         # System architecture & topology
-│   ├── database.md             # Schema specification
-│   ├── setup.md                # Installation and local development guide
-│   └── testing.md              # Test execution records
-├── .env.example                # Environment configuration template
-├── .gitignore
+│
+├── docs/
+│
+├── Dockerfile
+├── render.yaml
+├── vercel.json
+├── .env.example
 └── README.md
 ```
 
 ---
 
-## 5. Quickstart Guide
+## Getting Started
 
-### Step 1: Configure Environment
+Follow these instructions to run FormEase locally.
+
+### Prerequisites
+
+- Node.js and npm
+- Python 3.11 or a compatible supported version
+- Git
+- A Supabase project
+- An OpenRouter API key
+
+### 1. Clone the Repository
+
 ```bash
-cp .env.example .env
-```
-Fill in Supabase credentials and the free OpenRouter model/key in `.env`. The key stays backend-only. If using local OCR outside Docker, install Tesseract and the `eng`/`hin` language packs.
+git clone https://github.com/lakshya0102-dev/FormEase.git
 
-### Step 2: Run Backend Tests & Server
+cd FormEase
+```
+
+### 2. Backend Setup
+
+Create and activate a virtual environment:
+
 ```bash
-# Run automated tests
-python3 -m pytest backend/tests -q
-
-# Start FastAPI server
-uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m venv .venv
 ```
-API Documentation will be live at `http://localhost:8000/docs`.
 
-### Step 3: Run Frontend
+On macOS/Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+On Windows:
+
+```bash
+.venv\Scripts\activate
+```
+
+Install backend dependencies:
+
+```bash
+pip install -r backend/requirements.txt
+```
+
+Configure the backend environment variables using the provided `.env.example` as your reference.
+
+Start the backend:
+
+```bash
+uvicorn backend.app.main:app --reload --port 8000
+```
+
+If the repository's Python package layout requires running from the backend directory, use:
+
+```bash
+cd backend
+uvicorn app.main:app --reload --port 8000
+```
+
+Backend API:
+
+```text
+http://localhost:8000
+```
+
+API documentation:
+
+```text
+http://localhost:8000/docs
+```
+
+### 3. Frontend Setup
+
+Open another terminal:
+
 ```bash
 cd frontend
 npm install
+```
+
+Create `frontend/.env.local` and configure the frontend environment variables.
+
+Start the development server:
+
+```bash
 npm run dev
 ```
-Open `http://localhost:3000` in your browser.
+
+Frontend:
+
+```text
+http://localhost:3000
+```
 
 ---
 
-## 6. Free-tier limitations
+## Environment Variables
 
-OpenRouter free models have shared account and provider rate limits; failed attempts can count toward daily caps. Render's free backend can sleep after inactivity and has an ephemeral filesystem, so all user documents and history must stay in Supabase. See [docs/setup.md](docs/setup.md) before deployment.
+Never commit actual credentials, API keys, service-role keys, or secret tokens.
 
-## 7. University Documentation & Prompt Engineering
-A complete academic documentation dossier is provided in `docs/`:
-- **5-Part Prompts**: Role, Task, Context, Constraints, Output Format.
-- **Empirical Iterations**: Raw unconstrained outputs vs. bounded grounded outputs.
-- **3-Tool Attribution**: See the project report for the tools used during planning, runtime inference, and code review.
+### Frontend
+
+Configure these in `frontend/.env.local`:
+
+| Variable | Purpose |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase public client key |
+| `NEXT_PUBLIC_API_URL` | Backend API base URL |
+
+Example local API URL:
+
+```env
+NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
+```
+
+### Backend
+
+Configure the backend variables using the repository's `.env.example`:
+
+| Variable | Purpose |
+|---|---|
+| `SUPABASE_URL` | Supabase project base URL |
+| `SUPABASE_ANON_KEY` | Supabase public API key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-side privileged Supabase access, if required |
+| `OPENROUTER_API_KEY` | OpenRouter AI integration |
+| `ENVIRONMENT` | Application environment |
+| `DEBUG` | Debug mode |
+| `CORS_ORIGINS` | Allowed frontend origins |
+
+**Important:** `SUPABASE_URL` must contain only the Supabase project base URL, without `/rest/v1/` or another endpoint path.
+
+Production credentials must be configured through the respective Vercel and Render environment settings.
 
 ---
 
-## 8. License
-FormEase is developed as an open educational and commercial document productivity platform.
-# FormEase
+## API
+
+The backend exposes versioned endpoints under:
+
+```text
+/api/v1
+```
+
+Health check:
+
+```http
+GET /api/v1/health
+```
+
+Production health endpoint:
+
+https://formease-api.onrender.com/api/v1/health
+
+Interactive API documentation is available at:
+
+```text
+/docs
+```
+
+when the backend is running with API documentation enabled.
+
+---
+
+## Testing
+
+Run backend tests:
+
+```bash
+python -m pytest backend/tests -q
+```
+
+Run frontend type checking:
+
+```bash
+cd frontend
+npm run typecheck
+```
+
+Build the frontend:
+
+```bash
+npm run build
+```
+
+---
+
+## Deployment
+
+FormEase uses separate deployment services for the frontend and backend.
+
+### Frontend – Vercel
+
+The Next.js frontend is deployed on Vercel.
+
+Production environment configuration:
+
+```env
+NEXT_PUBLIC_API_URL=https://formease-api.onrender.com/api/v1
+```
+
+### Backend – Render
+
+The FastAPI backend is deployed on Render using the repository's `Dockerfile` and `render.yaml` configuration.
+
+The backend deployment uses environment variables configured securely in Render.
+
+### Database and Authentication – Supabase
+
+Supabase provides authentication and database services.
+
+Keep production credentials and privileged keys outside the Git repository.
+
+---
+
+## Security
+
+FormEase follows several security practices:
+
+- JWT signature verification.
+- Token expiration validation.
+- Issuer and audience validation where applicable.
+- Protected authenticated API routes.
+- Server-side management of privileged credentials.
+- Environment-based configuration.
+- CORS restrictions.
+
+Never expose backend secrets or Supabase service-role credentials in frontend code.
+
+---
+
+## Future Improvements
+
+Potential areas for continued development include:
+
+- More advanced AI-generated learning experiences.
+- Improved document visualization.
+- Additional document formats.
+- Enhanced diagram customization.
+- More powerful semantic document retrieval.
+- Improved processing performance.
+- Expanded testing and monitoring.
+
+---
+
+## Contributing
+
+Contributions, suggestions, and bug reports are welcome.
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Implement your changes.
+4. Run relevant tests.
+5. Submit a pull request.
+
+---
+
+## License
+
+A license has not yet been specified. All rights remain with the respective copyright holders until a license is added to the repository.
+
+---
+
+## Author
+
+**Lakshya Srivastava**
+
+B.Tech Computer Science Engineering – Artificial Intelligence & Data Science
+
+- GitHub: [lakshya0102-dev](https://github.com/lakshya0102-dev)
+- Project: [FormEase](https://github.com/lakshya0102-dev/FormEase)
+- Live Application: [formease-virid.vercel.app](https://formease-virid.vercel.app)
+
+---
+
+<p align="center">
+  <strong>FormEase – Making complex learning simpler.</strong>
+</p>
