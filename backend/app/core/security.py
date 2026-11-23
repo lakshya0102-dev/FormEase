@@ -12,6 +12,10 @@ import os
 import random
 import socket
 import traceback
+import ssl
+import queue
+from collections import deque
+from urllib.parse import urlsplit
 import httpx
 from fastapi import HTTPException, Security, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -24,6 +28,8 @@ security_scheme = HTTPBearer(auto_error=False)
 _jwks_cache: Dict[str, Any] = {"keys": [], "expires_at": 0.0, "url": ""}
 _jwks_lock = threading.Lock()
 _jwks_client: Optional[httpx.Client] = None
+_jwks_diagnostic_lock = threading.Lock()
+_jwks_diagnostic_started = False
 
 
 def _create_jwks_client() -> httpx.Client:
@@ -41,14 +47,38 @@ def _create_jwks_client() -> httpx.Client:
 def _exception_chain(exc: BaseException) -> list[BaseException]:
     chain = []
     seen = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen:
+    pending = deque([exc])
+    while pending:
+        current = pending.popleft()
+        if id(current) in seen:
+            continue
         seen.add(id(current))
         chain.append(current)
-        current = current.__cause__
-        if current is None and not chain[-1].__suppress_context__:
-            current = chain[-1].__context__
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
     return chain
+
+
+def _os_error_details(exc: BaseException) -> list[dict[str, Any]]:
+    chain = _exception_chain(exc)
+    errors = []
+    for item in chain:
+        if not isinstance(item, OSError):
+            continue
+        canonical_strerror = None
+        if isinstance(item.errno, int):
+            try:
+                canonical_strerror = os.strerror(item.errno)
+            except (OverflowError, ValueError):
+                pass
+        errors.append({
+            "exception_class": type(item).__name__,
+            "errno": item.errno,
+            "strerror": canonical_strerror if item.strerror == canonical_strerror else "<redacted>",
+        })
+    return errors
 
 
 def _classify_jwks_failure(exc: BaseException) -> tuple[str, Optional[int], Optional[int]]:
@@ -64,9 +94,22 @@ def _classify_jwks_failure(exc: BaseException) -> tuple[str, Optional[int], Opti
     if any(isinstance(item, socket.gaierror) for item in chain):
         return "dns", None, None
     os_error = next((item for item in chain if isinstance(item, OSError)), None)
-    if os_error is not None or any(isinstance(item, httpx.ConnectError) for item in chain):
-        return "tcp_connect", getattr(os_error, "errno", None), None
+    if os_error is not None:
+        return "tcp_connect", os_error.errno, None
+    if any(isinstance(item, httpx.ConnectError) for item in chain):
+        return "tcp_connect", None, None
     return "http_transport", None, None
+
+
+def _jwks_failure_details(exc: BaseException) -> dict[str, Any]:
+    phase, os_errno, http_status = _classify_jwks_failure(exc)
+    return {
+        "phase": phase,
+        "exception_class": type(exc).__name__,
+        "os_errno": os_errno,
+        "os_errors": _os_error_details(exc),
+        "http_status": http_status,
+    }
 
 
 def _safe_traceback(exc: BaseException) -> str:
@@ -80,7 +123,7 @@ def _safe_traceback(exc: BaseException) -> str:
 
 
 def _log_jwks_failure(exc: BaseException, attempt: int, will_retry: bool) -> None:
-    phase, os_errno, http_status = _classify_jwks_failure(exc)
+    details = _jwks_failure_details(exc)
     proxy_environment = {
         "HTTP_PROXY": bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")),
         "HTTPS_PROXY": bool(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")),
@@ -89,17 +132,143 @@ def _log_jwks_failure(exc: BaseException, attempt: int, will_retry: bool) -> Non
     }
     logger.log(
         logging.WARNING if will_retry else logging.ERROR,
-        "Supabase JWKS retrieval failed: phase=%s error_type=%s attempt=%s retry=%s "
-        "os_errno=%s http_status=%s trust_env=True proxy_environment=%s\n%s",
-        phase,
-        type(exc).__name__,
+        "Supabase JWKS retrieval failed: details=%s attempt=%s retry=%s "
+        "trust_env=True proxy_environment=%s\n%s",
+        details,
         attempt + 1,
         will_retry,
-        os_errno,
-        http_status,
         proxy_environment,
         _safe_traceback(exc),
     )
+
+
+def _resolve_supabase_addresses(hostname: str, timeout: float = 0.3) -> tuple[dict[str, Any], list[tuple]]:
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def resolve() -> None:
+        try:
+            result_queue.put((socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM), None))
+        except Exception as exc:
+            result_queue.put((None, exc))
+
+    # getaddrinfo has no timeout argument, so isolate it from the request thread.
+    threading.Thread(target=resolve, name="supabase-jwks-dns-probe", daemon=True).start()
+    try:
+        records, error = result_queue.get(timeout=timeout)
+    except queue.Empty:
+        return {"status": "timeout", "addresses": []}, []
+    if error is not None:
+        return {"status": "failed", "failure": _jwks_failure_details(error), "addresses": []}, []
+
+    addresses = []
+    candidates = []
+    seen = set()
+    for family, socktype, proto, _, sockaddr in records:
+        ip_address = sockaddr[0]
+        identity = (family, socktype, proto, ip_address)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        addresses.append({
+            "family": socket.AddressFamily(family).name,
+            "socket_type": socket.SocketKind(socktype).name,
+            "ip": ip_address,
+        })
+        candidates.append((family, socktype, proto, sockaddr))
+        if len(candidates) == 8:
+            break
+    return {
+        "status": "ok",
+        "addresses": addresses,
+        "truncated": len(records) > len(candidates),
+    }, candidates
+
+
+def _probe_direct_socket(
+    family: int,
+    socktype: int,
+    proto: int,
+    sockaddr: tuple,
+    hostname: str,
+    use_tls: bool,
+) -> dict[str, Any]:
+    raw_socket = None
+    try:
+        raw_socket = socket.socket(family, socktype, proto)
+        raw_socket.settimeout(0.2)
+        raw_socket.connect(sockaddr)
+        if use_tls:
+            tls_socket = ssl.create_default_context().wrap_socket(raw_socket, server_hostname=hostname)
+            raw_socket = None
+            with tls_socket:
+                tls_socket.settimeout(0.2)
+                tls_socket.do_handshake()
+        return {"status": "ok"}
+    except Exception as exc:
+        return {"status": "failed", "failure": _jwks_failure_details(exc)}
+    finally:
+        if raw_socket is not None:
+            raw_socket.close()
+
+
+def _probe_supabase_network(jwks_url: str) -> dict[str, Any]:
+    hostname = urlsplit(jwks_url).hostname
+    if not hostname:
+        return {"status": "invalid_supabase_hostname"}
+
+    dns_result, addresses = _resolve_supabase_addresses(hostname)
+    result: dict[str, Any] = {
+        "hostname": hostname,
+        "dns": dns_result,
+        "direct_tcp": [],
+        "direct_tls": [],
+        "httpx": None,
+    }
+    for family, socktype, proto, sockaddr in addresses[:2]:
+        target = sockaddr[0]
+        tcp_result = _probe_direct_socket(family, socktype, proto, sockaddr, hostname, False)
+        result["direct_tcp"].append({"ip": target, **tcp_result})
+        if tcp_result["status"] == "ok":
+            tls_result = _probe_direct_socket(family, socktype, proto, sockaddr, hostname, True)
+            result["direct_tls"].append({"ip": target, **tls_result})
+
+    try:
+        with httpx.Client(
+            timeout=httpx.Timeout(connect=0.35, read=0.35, write=0.2, pool=0.15),
+            limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+            trust_env=True,
+        ) as client:
+            with client.stream("GET", jwks_url) as response:
+                http_status = response.status_code
+        result["httpx"] = {"status": "response", "http_status": http_status}
+    except Exception as exc:
+        result["httpx"] = {"status": "failed", "failure": _jwks_failure_details(exc)}
+    result["proxy_environment"] = {
+        "HTTP_PROXY": bool(os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")),
+        "HTTPS_PROXY": bool(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")),
+        "ALL_PROXY": bool(os.environ.get("ALL_PROXY") or os.environ.get("all_proxy")),
+        "NO_PROXY": bool(os.environ.get("NO_PROXY") or os.environ.get("no_proxy")),
+    }
+    return result
+
+
+def _run_supabase_network_diagnostic(jwks_url: str) -> None:
+    global _jwks_diagnostic_started
+
+    with _jwks_diagnostic_lock:
+        if _jwks_diagnostic_started:
+            return
+        _jwks_diagnostic_started = True
+
+    try:
+        result = _probe_supabase_network(jwks_url)
+        logger.warning("Temporary Supabase JWKS network diagnostic: %s", result)
+    except Exception as exc:
+        logger.warning(
+            "Temporary Supabase JWKS network diagnostic failed: %s\n%s",
+            _jwks_failure_details(exc),
+            _safe_traceback(exc),
+        )
 
 
 def _discard_jwks_client() -> None:
@@ -152,6 +321,7 @@ def _get_supabase_jwks(force_refresh: bool = False) -> list:
                     time.sleep(random.uniform(0.05, 0.15) * (2 ** attempt))
                     continue
                 _discard_jwks_client()
+                _run_supabase_network_diagnostic(jwks_url)
                 raise
             except Exception as exc:
                 _log_jwks_failure(exc, attempt, False)

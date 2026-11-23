@@ -1,7 +1,10 @@
 import logging
+import os
 import socket
 import threading
 import time
+from contextlib import contextmanager
+from types import SimpleNamespace
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
@@ -200,7 +203,7 @@ def test_jwks_failure_logs_traceback_but_not_token_or_secrets(monkeypatch, caplo
 
     def connect_busy():
         error = httpx.ConnectError("device is busy")
-        error.__cause__ = OSError(16, "Device or resource busy")
+        error.__cause__ = OSError(16, os.strerror(16))
         return error
 
     failed_clients = [
@@ -210,6 +213,7 @@ def test_jwks_failure_logs_traceback_but_not_token_or_secrets(monkeypatch, caplo
         FakeClient(connect_busy()),
     ]
     install_clients(monkeypatch, *failed_clients)
+    monkeypatch.setattr(security, "_run_supabase_network_diagnostic", lambda _: None)
     caplog.set_level(logging.WARNING, logger=security.__name__)
 
     for _ in range(2):
@@ -219,8 +223,9 @@ def test_jwks_failure_logs_traceback_but_not_token_or_secrets(monkeypatch, caplo
         assert "device is busy" not in error.value.detail
 
     assert "Traceback" in caplog.text
-    assert "phase=tcp_connect" in caplog.text
-    assert "os_errno=16" in caplog.text
+    assert "'phase': 'tcp_connect'" in caplog.text
+    assert "'os_errno': 16" in caplog.text
+    assert "'strerror': '<redacted>'" not in caplog.text
     assert "'HTTPS_PROXY': True" in caplog.text
     assert "device is busy" not in caplog.text
     assert token not in caplog.text
@@ -229,6 +234,185 @@ def test_jwks_failure_logs_traceback_but_not_token_or_secrets(monkeypatch, caplo
     assert proxy_url not in caplog.text
     assert security._jwks_cache == {"keys": [], "expires_at": 0.0, "url": ""}
     assert [len(client.calls) for client in failed_clients] == [1, 1, 1, 1]
+
+
+def test_exception_chain_follows_cause_and_context_with_cycle_protection():
+    outer = RuntimeError("private outer message")
+    cause = OSError(16, os.strerror(16))
+    context = socket.gaierror(-2, "private DNS message")
+    outer.__cause__ = cause
+    outer.__context__ = context
+    context.__cause__ = outer
+
+    chain = security._exception_chain(outer)
+    details = security._os_error_details(outer)
+
+    assert {type(error) for error in chain} == {RuntimeError, OSError, socket.gaierror}
+    assert len(chain) == 3
+    assert any(
+        error["exception_class"] == "OSError"
+        and error["errno"] == 16
+        and error["strerror"] == os.strerror(16)
+        for error in details
+    )
+    assert "private outer message" not in repr(details)
+    assert "private DNS message" not in repr(details)
+
+
+def test_dns_resolution_failure_reports_safe_cause_details(monkeypatch):
+    monkeypatch.setattr(
+        security.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(socket.gaierror(-2, "private DNS message")),
+    )
+
+    result, addresses = security._resolve_supabase_addresses("formease-test.supabase.co")
+
+    assert result["status"] == "failed"
+    assert result["failure"]["phase"] == "dns"
+    assert result["failure"]["os_errors"][0]["exception_class"] == "gaierror"
+    assert addresses == []
+    assert "private DNS message" not in repr(result)
+
+
+def test_dns_resolution_timeout_does_not_block_caller(monkeypatch):
+    release_resolver = threading.Event()
+
+    def blocked_getaddrinfo(*_args, **_kwargs):
+        release_resolver.wait(1)
+        return []
+
+    monkeypatch.setattr(security.socket, "getaddrinfo", blocked_getaddrinfo)
+    started = time.monotonic()
+    try:
+        result, addresses = security._resolve_supabase_addresses(
+            "formease-test.supabase.co",
+            timeout=0.02,
+        )
+    finally:
+        release_resolver.set()
+
+    assert time.monotonic() - started < 0.2
+    assert result == {"status": "timeout", "addresses": []}
+    assert addresses == []
+
+
+def test_dns_resolution_records_family_socket_type_and_ip(monkeypatch):
+    record = (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "unused", ("203.0.113.20", 443))
+    monkeypatch.setattr(security.socket, "getaddrinfo", lambda *_args, **_kwargs: [record])
+
+    result, candidates = security._resolve_supabase_addresses("formease-test.supabase.co")
+
+    assert result == {
+        "status": "ok",
+        "addresses": [{
+            "family": "AF_INET",
+            "socket_type": "SOCK_STREAM",
+            "ip": "203.0.113.20",
+        }],
+        "truncated": False,
+    }
+    assert candidates == [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, ("203.0.113.20", 443))]
+
+
+def test_direct_tcp_probe_reports_errno_without_raw_error_text(monkeypatch):
+    class FailingSocket:
+        def settimeout(self, _timeout):
+            pass
+
+        def connect(self, _address):
+            raise OSError(16, "private socket error message")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(security.socket, "socket", lambda *_args: FailingSocket())
+
+    result = security._probe_direct_socket(
+        socket.AF_INET,
+        socket.SOCK_STREAM,
+        0,
+        ("192.0.2.1", 443),
+        "formease-test.supabase.co",
+        False,
+    )
+
+    assert result["status"] == "failed"
+    assert result["failure"]["phase"] == "tcp_connect"
+    assert result["failure"]["os_errors"][0]["errno"] == 16
+    assert result["failure"]["os_errors"][0]["strerror"] == "<redacted>"
+    assert "private socket error message" not in repr(result)
+
+
+def test_network_probe_records_dns_tcp_tls_and_httpx_results(monkeypatch):
+    hostname = "formease-test.supabase.co"
+    url = f"https://{hostname}/auth/v1/.well-known/jwks.json"
+    proxy_url = "https://proxy-user:proxy-password@proxy.invalid"
+    monkeypatch.setenv("HTTPS_PROXY", proxy_url)
+    candidate = (socket.AF_INET, socket.SOCK_STREAM, 6, ("203.0.113.10", 443))
+    dns_result = {
+        "status": "ok",
+        "addresses": [{
+            "family": "AF_INET",
+            "socket_type": "SOCK_STREAM",
+            "ip": "203.0.113.10",
+        }],
+        "truncated": False,
+    }
+
+    client_options = []
+
+    class FakeHttpxClient:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+            client_options.append(kwargs)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc_value, _exc_traceback):
+            pass
+
+        @contextmanager
+        def stream(self, method, request_url):
+            assert method == "GET"
+            assert request_url == url
+            yield SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(
+        security,
+        "_resolve_supabase_addresses",
+        lambda _: (dns_result, [candidate]),
+    )
+    monkeypatch.setattr(security, "_probe_direct_socket", lambda *_args: {"status": "ok"})
+    monkeypatch.setattr(security.httpx, "Client", FakeHttpxClient)
+
+    result = security._probe_supabase_network(url)
+
+    assert result["dns"] == dns_result
+    assert result["direct_tcp"] == [{"ip": "203.0.113.10", "status": "ok"}]
+    assert result["direct_tls"] == [{"ip": "203.0.113.10", "status": "ok"}]
+    assert result["httpx"] == {"status": "response", "http_status": 200}
+    assert result["proxy_environment"]["HTTPS_PROXY"]
+    assert client_options[0]["trust_env"] is True
+    assert "headers" not in client_options[0]
+    assert proxy_url not in repr(result)
+
+
+def test_temporary_network_diagnostic_runs_only_once(monkeypatch):
+    calls = []
+    monkeypatch.setattr(security, "_jwks_diagnostic_started", False)
+    monkeypatch.setattr(
+        security,
+        "_probe_supabase_network",
+        lambda url: calls.append(url) or {"httpx": {"status": "response", "http_status": 200}},
+    )
+
+    url = f"{PROJECT_URL}/auth/v1/.well-known/jwks.json"
+    security._run_supabase_network_diagnostic(url)
+    security._run_supabase_network_diagnostic(url)
+
+    assert calls == [url]
 
 
 def test_jwks_failure_classifier_distinguishes_dns_proxy_timeout_and_http_status():
